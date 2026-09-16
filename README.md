@@ -8,8 +8,14 @@ query connected knowledge sources, and return answers with source citations.
 ## Install
 
 ```bash
-npx github:oneprolabs/sourcelens-agent-kit install \
+npx sourcelens-agent-kit install \
   --client codex --url https://lens.example.com/mcp --api-key "$SOURCELENS_API_KEY"
+npx sourcelens-agent-kit install --client claude
+```
+
+To run an unreleased revision straight from the repository instead:
+
+```bash
 npx github:oneprolabs/sourcelens-agent-kit install --client claude
 ```
 
