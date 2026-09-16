@@ -27,8 +27,8 @@ If `sourcelens` is not on `PATH` yet, invoke
 
 2. **Choose exactly one assistant.** Read every `routing_description` and
    weigh it together with `datasources`, `capability`, and `mode`. Pick the
-   single best match for the user's question. `assistant_uuid` is mandatory on
-   every call, so a selection is always required.
+   single best match for the user's question. An assistant is always required,
+   so a selection is always necessary.
 
    - `capability: knowledge_qa` answers over its bound data sources.
      `capability: general_chat` additionally covers connected tools.
@@ -50,15 +50,12 @@ If `sourcelens` is not on `PATH` yet, invoke
    sourcelens ask "<question>" --assistant <slug|uuid|name>
    ```
 
-   Useful options: `--tool sourcelens_search` when you want focused evidence
-   before answering, `--workspace NAME` to narrow the scope, `--max-results N`
-   to bound the evidence, `--json` for the raw run payload (`run_uuid`,
-   `status`, `answer`, `citations`), `--lang zh|en|es` to localize the routing
-   text and the answer. The command resolves the selector, submits the run,
-   waits for completion, and prints the answer.
+   Useful options: `--timeout S` to bound the wait, `--json` for the raw run
+   payload (`uuid`, `status`, `answer`, `citations`), `--lang zh|en|es` to
+   localize the routing text and the answer. The command resolves the selector,
+   creates a session and run, waits for completion, and prints the answer.
 
-   Use `--tool sourcelens_search` to gather evidence, `--tool sourcelens_ask`
-   for a composed answer. Both are read-only.
+   The request is read-only.
 
 4. **Finish the answer locally.** SourceLens returns evidence, not a finished
    reply. Before responding to the user:
@@ -79,9 +76,9 @@ If `sourcelens` is not on `PATH` yet, invoke
 
 ## Credentials
 
-`sourcelens assistants` and `sourcelens ask` read `SOURCELENS_MCP_URL` and
+`sourcelens assistants` and `sourcelens ask` read `SOURCELENS_BASE_URL` and
 `SOURCELENS_API_KEY` from the environment, falling back to
 `~/.config/sourcelens/env` when the shell profile has not loaded them. Run
-`sourcelens install --url <gateway> --api-key <key>` when they are missing or
-expired. Run `sourcelens ping` to confirm the endpoint and its read-only tools
+`sourcelens install --url <service url> --api-key <key>` when they are missing
+or expired. Run `sourcelens ping` to confirm the service URL and credentials
 respond; it spends no run and is safe to run before every session.

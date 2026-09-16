@@ -7,7 +7,7 @@ const path = require('path')
 
 const POLL_INTERVAL_MS = 1500
 const DEFAULT_TIMEOUT_S = 180
-const TOOLS = ['sourcelens_ask', 'sourcelens_search']
+const TERMINAL_STATUSES = ['done', 'failed', 'error', 'cancelled']
 
 function die(message, code = 2) {
   console.error(message)
@@ -18,21 +18,21 @@ function usage() {
   console.error(`Usage: sourcelens <command> [options]
 
 Commands:
-  install [--url URL] [--api-key KEY] [--no-mcp]
-        Install the SourceLens Q&A skill, store credentials, and register the
-        MCP server with the host CLI. Pass --no-mcp to skip credentials and MCP setup.
+  install [--url URL] [--api-key KEY] [--no-auth]
+        Install the SourceLens Q&A skill, store credentials, and add the CLI
+        to PATH. Pass --no-auth to skip credentials setup.
 
   assistants [--json] [--lang zh|en|es]
         List assistants with the routing synopsis used to choose one.
 
   ping [--json] [--lang zh|en|es]
-        Verify the MCP endpoint and its read-only tools. Spends no Q&A run.
+        Verify the service URL and credentials. Spends no Q&A run.
 
-  ask "<question>" --assistant <slug|uuid|name> [--tool sourcelens_ask|sourcelens_search]
-        [--workspace NAME] [--max-results N] [--timeout S] [--json] [--lang zh|en|es]
+  ask "<question>" --assistant <slug|uuid|name> [--timeout S] [--json]
+        [--lang zh|en|es]
         Ask one assistant and wait for the answer.
 
-Credentials come from SOURCELENS_MCP_URL and SOURCELENS_API_KEY, or from
+Credentials come from SOURCELENS_BASE_URL and SOURCELENS_API_KEY, or from
 ~/.config/sourcelens/env written by 'sourcelens install'.`)
 }
 
@@ -75,28 +75,38 @@ function readEnvFile() {
   if (!fs.existsSync(file)) return {}
   const script =
     'set -a; . "$1" 2>/dev/null; set +a; ' +
-    'printf "%s\\0%s\\0" "${SOURCELENS_MCP_URL:-}" "${SOURCELENS_API_KEY:-}"'
+    'printf "%s\\0%s\\0" "${SOURCELENS_BASE_URL:-}" "${SOURCELENS_API_KEY:-}"'
   const result = spawnSync('bash', ['-c', script, 'sourcelens', file], { encoding: 'utf8' })
   if (result.status !== 0) return {}
   const [url, key] = result.stdout.split('\0')
-  return { SOURCELENS_MCP_URL: url, SOURCELENS_API_KEY: key }
+  return { SOURCELENS_BASE_URL: url, SOURCELENS_API_KEY: key }
+}
+
+function normalizeBase(url) {
+  let parsed
+  try {
+    parsed = new URL(url)
+  } catch {
+    die(`invalid SOURCELENS_BASE_URL: ${url}`)
+  }
+  return parsed.origin + parsed.pathname.replace(/\/+$/, '')
 }
 
 function credentials() {
   const stored = readEnvFile()
-  const url = process.env.SOURCELENS_MCP_URL || stored.SOURCELENS_MCP_URL
+  const url = process.env.SOURCELENS_BASE_URL || stored.SOURCELENS_BASE_URL
   const key = process.env.SOURCELENS_API_KEY || stored.SOURCELENS_API_KEY
-  if (!url) die('SOURCELENS_MCP_URL is not set. Run: sourcelens install')
+  if (!url) die('SOURCELENS_BASE_URL is not set. Run: sourcelens install')
   if (!key) die('SOURCELENS_API_KEY is not set. Run: sourcelens install')
-  return { url, key }
+  return { url: normalizeBase(url), key }
 }
 
-function endpoint(url) {
-  const parsed = new URL(url)
-  const mcpPath = parsed.pathname.replace(/\/+$/, '')
+function endpoints(base) {
   return {
-    origin: parsed.origin,
-    assistants: `${parsed.origin}${mcpPath.replace(/\/mcp$/, '')}/assistants/`,
+    assistants: `${base}/api/lens/assistants/`,
+    sessions: `${base}/api/lens/sessions/`,
+    sessionRuns: (uuid) => `${base}/api/lens/sessions/${uuid}/runs/`,
+    run: (uuid) => `${base}/api/lens/runs/${uuid}/`,
   }
 }
 
@@ -125,15 +135,15 @@ function unwrap(result) {
     die(`request failed (${result.status}): ${JSON.stringify(result.payload)}`)
   }
   const payload = result.payload
-  if (payload && typeof payload === 'object' && payload.jsonrpc) {
-    return payload
+  if (payload && typeof payload === 'object' && payload.data !== undefined) {
+    return payload.data
   }
-  return payload.data
+  return payload
 }
 
 async function listAssistants(url, key, lang) {
   const collected = []
-  let next = endpoint(url).assistants
+  let next = endpoints(url).assistants
   while (next) {
     const page = unwrap(await request(next, { key, lang }))
     collected.push(...(page.results || []))
@@ -234,62 +244,24 @@ async function cmdAssistants(argv) {
   printTable(catalog)
 }
 
-async function mcpRpc(url, { key, lang }, body) {
-  const result = await request(url, { method: 'POST', key, lang, body })
-  const payload = result.payload
-  if (payload && typeof payload === 'object' && payload.error) {
-    die(`MCP error: ${payload.error.message || JSON.stringify(payload.error)}`)
-  }
-  if (result.status >= 400) {
-    die(`MCP request failed (${result.status}): ${JSON.stringify(payload)}`)
-  }
-  return payload && typeof payload === 'object' ? payload.result : undefined
-}
-
 async function cmdPing(argv) {
   const options = parseArgs(argv, { json: 'bool', lang: 'value' })
   const { url, key } = credentials()
-  const init = await mcpRpc(url, { key, lang: options.lang }, {
-    jsonrpc: '2.0',
-    id: 1,
-    method: 'initialize',
-    params: {
-      protocolVersion: '2025-03-26',
-      capabilities: {},
-      clientInfo: { name: 'sourcelens-cli' },
-    },
-  })
-  const listed = await mcpRpc(url, { key, lang: options.lang }, {
-    jsonrpc: '2.0',
-    id: 2,
-    method: 'tools/list',
-  })
-  const serverInfo = (init && init.serverInfo) || {}
-  const tools = ((listed && listed.tools) || []).map((tool) => tool.name)
-  const missing = TOOLS.filter((tool) => !tools.includes(tool))
-  if (missing.length) die(`MCP endpoint is missing read-only tools: ${missing.join(', ')}`)
+  const page = unwrap(
+    await request(endpoints(url).assistants, { key, lang: options.lang })
+  )
+  const visible = (page.results || []).length
   if (options.json) {
-    console.log(JSON.stringify({
-      url,
-      server: serverInfo.name || null,
-      version: serverInfo.version || null,
-      protocolVersion: (init && init.protocolVersion) || null,
-      tools,
-    }, null, 2))
+    console.log(JSON.stringify({ url, assistants: visible }, null, 2))
     return
   }
-  console.log(`MCP endpoint OK: ${url}`)
-  console.log(`server: ${[serverInfo.name, serverInfo.version].filter(Boolean).join(' ') || 'unknown'}`)
-  console.log(`protocol: ${(init && init.protocolVersion) || 'unknown'}`)
-  console.log(`tools: ${tools.join(', ')}`)
+  console.log(`SourceLens service OK: ${url}`)
+  console.log(`assistants visible: ${visible}`)
 }
 
 async function cmdAsk(argv) {
   const options = parseArgs(argv, {
     assistant: 'value',
-    tool: 'value',
-    workspace: 'value',
-    'max-results': 'value',
     timeout: 'value',
     json: 'bool',
     lang: 'value',
@@ -297,44 +269,50 @@ async function cmdAsk(argv) {
   const query = options._.join(' ').trim()
   if (!query) die('ask requires a question, e.g. sourcelens ask "..." --assistant <name>')
   if (!options.assistant) die('ask requires --assistant <slug|uuid|name>')
-  const tool = options.tool || 'sourcelens_ask'
-  if (!TOOLS.includes(tool)) die(`--tool must be one of: ${TOOLS.join(', ')}`)
   const timeout = Number(options.timeout || DEFAULT_TIMEOUT_S)
   if (!Number.isFinite(timeout) || timeout <= 0) die('--timeout must be a positive number')
 
   const { url, key } = credentials()
+  const api = endpoints(url)
   const assistantUuid = await resolveAssistant(options.assistant, url, key, options.lang)
-  const args = { assistant_uuid: assistantUuid, query }
-  if (options.workspace) args.workspace = options.workspace
-  if (options['max-results']) args.max_results = Number(options['max-results'])
 
-  const call = unwrap(
-    await request(url, {
+  const session = unwrap(
+    await request(api.sessions, {
+      method: 'POST',
+      key,
+      lang: options.lang,
+      body: { assistant_uuid: assistantUuid },
+    })
+  )
+  if (!session || !session.uuid) {
+    die(`unexpected session response: ${JSON.stringify(session)}`)
+  }
+
+  const created = unwrap(
+    await request(api.sessionRuns(session.uuid), {
       method: 'POST',
       key,
       lang: options.lang,
       body: {
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'tools/call',
-        params: { name: tool, arguments: args },
+        question: query,
+        request_source: {
+          channel: 'cli',
+          client: process.env.SOURCELENS_CLIENT || 'unknown',
+        },
       },
     })
   )
-  const result = call.result || {}
-  const text = (result.content || []).map((part) => part.text).join('')
-  const runUuid = (text.match(/run_uuid=(\S+)/) || [])[1]
-  const resultPath = (text.match(/result_path=(\S+)/) || [])[1]
-  if (!runUuid || !resultPath) die(`unexpected gateway response: ${text || JSON.stringify(call)}`)
+  const runUuid = created && created.uuid
+  if (!runUuid) die(`unexpected run response: ${JSON.stringify(created)}`)
 
   const deadline = Date.now() + timeout * 1000
-  let run
-  while (Date.now() < deadline) {
+  let run = created
+  while (!TERMINAL_STATUSES.includes(run.status) && Date.now() < deadline) {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), deadline - Date.now())
     try {
       run = unwrap(
-        await request(new URL(resultPath, endpoint(url).origin), {
+        await request(api.run(runUuid), {
           key,
           lang: options.lang,
           signal: controller.signal,
@@ -346,11 +324,11 @@ async function cmdAsk(argv) {
     } finally {
       clearTimeout(timer)
     }
-    if (['done', 'failed', 'error', 'cancelled'].includes(run.status)) break
+    if (TERMINAL_STATUSES.includes(run.status)) break
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
   }
 
-  const unfinished = !run || !['done', 'failed', 'error', 'cancelled'].includes(run.status)
+  const unfinished = !run || !TERMINAL_STATUSES.includes(run.status)
   if (options.json) {
     if (run !== undefined) console.log(JSON.stringify(run, null, 2))
     if (unfinished) console.error('timed out waiting for the assistant result')
