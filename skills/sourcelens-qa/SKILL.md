@@ -6,8 +6,8 @@ description: Answer questions that depend on documents, code repositories, proje
 # SourceLens Q&A
 
 Use SourceLens for questions whose answer must come from the user's connected
-knowledge sources. You choose the assistant yourself, then shape the answer
-before returning it.
+knowledge sources. You choose the assistant yourself — asking the user only
+when no candidate clearly fits — then shape the answer before returning it.
 
 ## Workflow
 
@@ -27,9 +27,8 @@ If `sourcelens` is not on `PATH` yet, invoke
 
 2. **Choose exactly one assistant.** Read every `routing_description` and
    weigh it together with `datasources`, `capability`, and `mode`. Pick the
-   single best match for the user's question; do not hand the choice back to
-   the user unless two candidates are genuinely tied. `assistant_uuid` is
-   mandatory on every call, so a selection is always required.
+   single best match for the user's question. `assistant_uuid` is mandatory on
+   every call, so a selection is always required.
 
    - `capability: knowledge_qa` answers over its bound data sources.
      `capability: general_chat` additionally covers connected tools.
@@ -37,6 +36,13 @@ If `sourcelens` is not on `PATH` yet, invoke
      across a collaboration team and suits broad or multi-topic questions.
    - A data source name on its own is weak evidence; match on the routing
      synopsis first.
+
+   When no candidate clearly fits, or several are genuinely tied, do not guess:
+   show the user a short list of the plausible assistants — `name` plus a
+   one-line `routing_description`, with `capability` and `datasources` when they
+   disambiguate — and ask which one to use. When nothing looks close, offer the
+   whole catalog the same way. Pass `--lang` so the list matches the user's
+   language, then continue with the assistant the user picks.
 
 3. **Ask.**
 

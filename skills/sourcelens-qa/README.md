@@ -15,8 +15,9 @@ sourcelens ask "<question>" --assistant <slug|uuid|name>
 
 `ping` is the lightweight check that credentials, scope, and the MCP transport
 work; `assistants` lists every assistant visible to the account. The agent reads
-the `routing_description` of each candidate, picks the best match, and then runs
-`ask`, which submits the run, waits for completion, and prints the answer.
+the `routing_description` of each candidate, picks the best match — asking the
+user to choose when none clearly fits — and then runs `ask`, which submits the
+run, waits for completion, and prints the answer.
 `--json` returns the raw run payload (`run_uuid`, `status`, `answer`,
 `citations`) so the agent can shape the final reply itself.
 
