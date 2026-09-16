@@ -13,7 +13,7 @@ const assistant = {
   datasource_bindings: [{ datasource_name: 'Docs' }],
 }
 const answer = {
-  run_uuid: 'run-1', status: 'done', answer: 'The project provides Q&A.',
+  uuid: 'run-1', status: 'done', answer: 'The project provides Q&A.',
   citations: [{ path: 'README.md', start_line: 1, end_line: 3 }],
 }
 
@@ -29,36 +29,26 @@ async function fixture(t, options = {}) {
       res.writeHead(status, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(body))
     }
-    if (options.httpError) return json({ detail: 'Access denied' }, options.httpError)
-    if (req.url.startsWith('/api/assistants/')) {
+    if (options.httpError) {
+      return json({ code: options.httpError, message: 'failed', data: { detail: 'Access denied' } }, options.httpError)
+    }
+    if (req.url.startsWith('/api/lens/assistants/')) {
       const page = new URL(req.url, 'http://localhost').searchParams.get('page')
       const rows = options.catalog || [assistant]
-      return json({ data: {
+      return json({ code: 0, message: 'success', data: {
         results: options.paginated && !page ? Array.from({ length: 200 }, (_, i) => ({ ...assistant, uuid: `uuid-${i}`, slug: `slug-${i}` })) : rows,
-        next: options.paginated && !page ? `${origin}/api/assistants/?page=2` : null,
+        next: options.paginated && !page ? `${origin}/api/lens/assistants/?page=2` : null,
       } })
     }
-    if (req.url === '/api/mcp') {
-      const body = raw ? JSON.parse(raw) : {}
-      if (options.rpcError) return json(options.rpcError)
-      if (body.method === 'initialize') return json({
-        jsonrpc: '2.0', id: body.id,
-        result: {
-          protocolVersion: '2025-03-26',
-          capabilities: { tools: {} },
-          serverInfo: { name: 'sourcelens-qa', version: '1.0.0' },
-        },
-      })
-      if (body.method === 'tools/list') return json({
-        jsonrpc: '2.0', id: body.id,
-        result: { tools: options.tools || [{ name: 'sourcelens_ask' }, { name: 'sourcelens_search' }] },
-      })
-      return json({
-        jsonrpc: '2.0', id: body.id,
-        result: { content: [{ type: 'text', text: 'run_uuid=run-1 result_path=/api/runs/run-1/' }] },
-      })
+    if (req.url === '/api/lens/sessions/' && req.method === 'POST') {
+      if (options.createError) return json({ code: 400, message: 'failed', data: options.createError }, 400)
+      return json({ code: 0, message: 'success', data: { uuid: 'session-1' } }, 201)
     }
-    if (req.url === '/api/runs/run-1/') {
+    if (req.url === '/api/lens/sessions/session-1/runs/' && req.method === 'POST') {
+      if (options.createError) return json({ code: 400, message: 'failed', data: options.createError }, 400)
+      return json({ code: 0, message: 'success', data: { ...answer, status: 'queued', answer: '', citations: [] } }, 201)
+    }
+    if (req.url === '/api/lens/runs/run-1/') {
       polls += 1
       if (options.hang === 'headers') return
       if (options.hang === 'body') {
@@ -66,9 +56,9 @@ async function fixture(t, options = {}) {
         res.write('{"data":')
         return
       }
-      return json({ data: { ...answer, status: options.status || (options.pendingFirst && polls === 1 ? 'running' : 'done') } })
+      return json({ code: 0, message: 'success', data: { ...answer, status: options.status || (options.pendingFirst && polls === 1 ? 'running' : 'done') } })
     }
-    json({ detail: 'Unexpected route' }, 404)
+    json({ code: 404, message: 'failed', data: { detail: 'Unexpected route' } }, 404)
   })
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   const origin = `http://127.0.0.1:${server.address().port}`
@@ -77,16 +67,17 @@ async function fixture(t, options = {}) {
     await new Promise((resolve) => server.close(resolve))
     fs.rmSync(dir, { recursive: true, force: true })
   })
-  const env = { ...process.env, SOURCELENS_HOME: dir, SOURCELENS_MCP_URL: `${origin}/api/mcp`, SOURCELENS_API_KEY: 'test-key' }
+  const env = { ...process.env, SOURCELENS_HOME: dir, SOURCELENS_BASE_URL: origin, SOURCELENS_API_KEY: 'test-key' }
   const run = (args, overrides = {}, timeout = 6000) => new Promise((resolve) => {
     execFile(process.execPath, [cli, ...args], { env: { ...env, ...overrides }, timeout }, (error, stdout, stderr) => {
       resolve({ code: error ? error.code : 0, killed: Boolean(error?.killed), stdout, stderr })
     })
   })
-  return { dir, env, requests, run }
+  return { dir, env, origin, requests, run }
 }
 
 const ask = ['ask', 'What does this project do?', '--assistant', 'docs']
+const runPolls = (requests) => requests.filter((req) => req.url === '/api/lens/runs/run-1/')
 
 test('assistant discovery preserves routing metadata, auth and language', async (t) => {
   const { run, requests } = await fixture(t)
@@ -106,7 +97,8 @@ test('pagination discovers and resolves assistants beyond the first 200', async 
   assert.equal(JSON.parse(listed.stdout).length, 201)
   const result = await run([...ask, '--json'])
   assert.equal(result.code, 0, result.stderr)
-  assert.equal(requests.find((req) => req.method === 'POST').body.params.arguments.assistant_uuid, assistant.uuid)
+  const created = requests.find((req) => req.url === '/api/lens/sessions/')
+  assert.equal(created.body.assistant_uuid, assistant.uuid)
 })
 
 test('empty assistant catalog has a readable message', async (t) => {
@@ -116,25 +108,16 @@ test('empty assistant catalog has a readable message', async (t) => {
   assert.match(result.stdout, /No assistants available/)
 })
 
-test('ping reports the MCP server and its read-only tools', async (t) => {
-  const { run, requests } = await fixture(t)
+test('ping reports the service without starting a run', async (t) => {
+  const { run, requests, origin } = await fixture(t)
   const result = await run(['ping', '--json'])
   assert.equal(result.code, 0, result.stderr)
   const info = JSON.parse(result.stdout)
-  assert.equal(info.server, 'sourcelens-qa')
-  assert.equal(info.protocolVersion, '2025-03-26')
-  assert.deepEqual(info.tools, ['sourcelens_ask', 'sourcelens_search'])
-  assert.equal(requests[0].body.method, 'initialize')
-  assert.equal(requests[1].body.method, 'tools/list')
+  assert.equal(info.url, origin)
+  assert.equal(info.assistants, 1)
   assert.equal(requests[0].headers.authorization, 'Bearer test-key')
+  assert.equal(requests.some((req) => req.method === 'POST'), false)
   assert.equal(requests.some((req) => req.url.includes('/runs/')), false)
-})
-
-test('ping fails when a read-only tool is missing', async (t) => {
-  const { run } = await fixture(t, { tools: [{ name: 'sourcelens_ask' }] })
-  const result = await run(['ping'])
-  assert.notEqual(result.code, 0)
-  assert.match(result.stderr, /sourcelens_search/)
 })
 
 for (const selector of ['DOCS', 'assistant-1', '文档助手', '文档']) {
@@ -146,18 +129,25 @@ for (const selector of ['DOCS', 'assistant-1', '文档助手', '文档']) {
   })
 }
 
-test('search forwards workspace, result limit and language, then polls to completion', async (t) => {
+test('ask creates a session, submits a run, and polls to completion', async (t) => {
   const { run, requests } = await fixture(t, { pendingFirst: true })
-  const result = await run([...ask, '--tool', 'sourcelens_search', '--workspace', 'Docs', '--max-results', '3', '--lang', 'zh'])
+  const result = await run([...ask, '--lang', 'zh'])
   assert.equal(result.code, 0, result.stderr)
   assert.match(result.stdout, /The project provides Q&A/)
   assert.match(result.stdout, /README.md/)
-  const call = requests.find((req) => req.method === 'POST')
-  assert.equal(call.body.params.name, 'sourcelens_search')
-  assert.deepEqual(call.body.params.arguments, {
-    assistant_uuid: assistant.uuid, query: ask[1], workspace: 'Docs', max_results: 3,
+
+  const session = requests.find((req) => req.url === '/api/lens/sessions/')
+  assert.equal(session.method, 'POST')
+  assert.deepEqual(session.body, { assistant_uuid: assistant.uuid })
+
+  const creates = requests.filter((req) => req.url === '/api/lens/sessions/session-1/runs/')
+  assert.equal(creates.length, 1)
+  assert.deepEqual(creates[0].body, {
+    question: ask[1],
+    request_source: { channel: 'cli', client: 'unknown' },
   })
-  assert.equal(requests.filter((req) => req.url.includes('/runs/')).length, 2)
+  assert.equal(creates[0].headers['accept-language'], 'zh')
+  assert.equal(runPolls(requests).length, 2)
 })
 
 for (const status of ['failed', 'error', 'cancelled']) {
@@ -183,14 +173,14 @@ for (const [selector, message] of [['missing', /not found/], ['文档', /ambiguo
 
 test('credentials fall back to env file and environment overrides stored values', async (t) => {
   const { run, dir, env, requests } = await fixture(t)
-  fs.writeFileSync(path.join(dir, 'env'), `export SOURCELENS_MCP_URL='${env.SOURCELENS_MCP_URL}'\nexport SOURCELENS_API_KEY='stored-key'\n`, { mode: 0o600 })
-  assert.equal((await run(['assistants', '--json'], { SOURCELENS_MCP_URL: '', SOURCELENS_API_KEY: '' })).code, 0)
+  fs.writeFileSync(path.join(dir, 'env'), `export SOURCELENS_BASE_URL='${env.SOURCELENS_BASE_URL}'\nexport SOURCELENS_API_KEY='stored-key'\n`, { mode: 0o600 })
+  assert.equal((await run(['assistants', '--json'], { SOURCELENS_BASE_URL: '', SOURCELENS_API_KEY: '' })).code, 0)
   assert.equal(requests[0].headers.authorization, 'Bearer stored-key')
   assert.equal((await run(['assistants', '--json'])).code, 0)
   assert.equal(requests[1].headers.authorization, 'Bearer test-key')
 })
 
-test('missing credentials fails locally before contacting gateway', async (t) => {
+test('missing credentials fails locally before contacting the service', async (t) => {
   const { run, requests } = await fixture(t)
   const result = await run(['assistants'], { SOURCELENS_API_KEY: '' })
   assert.equal(result.code, 2)
@@ -205,12 +195,12 @@ test('HTTP unauthorized response produces nonzero exit and useful error', async 
   assert.match(result.stderr, /401.*Access denied/)
 })
 
-test('JSON-RPC tool error does not start polling', async (t) => {
-  const { run, requests } = await fixture(t, { rpcError: { jsonrpc: '2.0', id: 1, error: { code: -32602, message: 'Invalid assistant' } } })
+test('run creation error does not start polling', async (t) => {
+  const { run, requests } = await fixture(t, { createError: { assistant_uuid: ['Invalid assistant'] } })
   const result = await run(ask)
   assert.equal(result.code, 2)
   assert.match(result.stderr, /Invalid assistant/)
-  assert.equal(requests.some((req) => req.url.includes('/runs/')), false)
+  assert.equal(runPolls(requests).length, 0)
 })
 
 for (const hang of ['headers', 'body']) {

@@ -23,7 +23,7 @@ function fixture(t) {
     SOURCELENS_PROFILE: path.join(dir, 'profile'),
     CODEX_HOME: path.join(dir, 'codex'),
     CLAUDE_HOME: path.join(dir, 'claude'),
-    SOURCELENS_MCP_URL: '',
+    SOURCELENS_BASE_URL: '',
     SOURCELENS_API_KEY: '',
   }
   const run = (script, args = []) => spawnSync('bash', [script, ...args], {
@@ -35,7 +35,7 @@ function fixture(t) {
 test('installation persists a working CLI beyond the package directory', (t) => {
   const { env, run } = fixture(t)
   const result = run(path.join(root, 'install.sh'), [
-    '--no-mcp', '--url', 'http://localhost/mcp', '--api-key', 'test-key',
+    '--no-auth', '--url', 'http://localhost', '--api-key', 'test-key',
   ])
   assert.equal(result.status, 0, result.stderr)
   const installed = path.join(env.XDG_BIN_HOME, 'sourcelens')
@@ -46,7 +46,7 @@ test('installation persists a working CLI beyond the package directory', (t) => 
     env, encoding: 'utf8',
   })
   assert.equal(shell.stdout.trim(), installed)
-  const reinstall = spawnSync(installed, ['install', '--no-mcp'], {
+  const reinstall = spawnSync(installed, ['install', '--no-auth'], {
     env, encoding: 'utf8', input: '',
   })
   assert.equal(reinstall.status, 0, reinstall.stderr)
@@ -55,7 +55,7 @@ test('installation persists a working CLI beyond the package directory', (t) => 
 
 test('skill-only installation needs no credentials and preserves an existing env file', (t) => {
   const { env, run } = fixture(t)
-  const args = ['--no-mcp']
+  const args = ['--no-auth']
   const result = run(path.join(root, 'install.sh'), args)
   assert.equal(result.status, 0, result.stderr)
   assert.ok(fs.existsSync(path.join(env.CLAUDE_HOME, 'skills/sourcelens-qa/SKILL.md')))
@@ -73,7 +73,7 @@ test('migrates credentials from the legacy ~/.sourcelens layout', (t) => {
   const legacy = path.join(env.HOME, '.sourcelens')
   fs.mkdirSync(legacy, { recursive: true })
   fs.writeFileSync(path.join(legacy, 'env'), 'export SOURCELENS_API_KEY=legacy\n', { mode: 0o600 })
-  const result = run(path.join(root, 'install.sh'), ['--no-mcp'])
+  const result = run(path.join(root, 'install.sh'), ['--no-auth'])
   assert.equal(result.status, 0, result.stderr)
   const migrated = path.join(env.XDG_CONFIG_HOME, 'sourcelens', 'env')
   assert.equal(fs.readFileSync(migrated, 'utf8'), 'export SOURCELENS_API_KEY=legacy\n')

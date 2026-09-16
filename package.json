@@ -1,7 +1,7 @@
 {
   "name": "sourcelens-agent-kit",
-  "version": "0.1.2",
-  "description": "Installable SourceLens Agent Kit with a read-only Q&A CLI, MCP integration, and Skills for Codex and Claude",
+  "version": "0.2.0",
+  "description": "Installable SourceLens Agent Kit with a read-only Q&A CLI and Skills for Codex and Claude",
   "bin": {
     "sourcelens": "bin/sourcelens.js"
   },
@@ -15,7 +15,6 @@
   },
   "keywords": [
     "sourcelens",
-    "mcp",
     "codex",
     "claude",
     "skill",
