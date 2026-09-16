@@ -1,0 +1,14 @@
+{
+  "name": "sourcelens-qa",
+  "displayName": "SourceLens Q&A",
+  "description": "Read-only question answering over authorized SourceLens workspaces.",
+  "transport": "streamable-http",
+  "url_env": "SOURCELENS_MCP_URL",
+  "api_key_env": "SOURCELENS_API_KEY",
+  "api_key_scheme": "Bearer",
+  "tools": [
+    "sourcelens_ask",
+    "sourcelens_search"
+  ],
+  "authorization": "source-lens-gateway"
+}
