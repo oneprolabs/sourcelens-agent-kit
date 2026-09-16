@@ -12,8 +12,16 @@ function fixture(t) {
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
   const env = {
     ...process.env,
-    SOURCELENS_HOME: path.join(dir, 'client home'),
+    HOME: dir,
+    XDG_CONFIG_HOME: path.join(dir, 'config'),
+    XDG_DATA_HOME: path.join(dir, 'data'),
+    XDG_BIN_HOME: path.join(dir, 'bin'),
+    SOURCELENS_HOME: '',
+    SOURCELENS_CONFIG_HOME: '',
+    SOURCELENS_DATA_HOME: '',
+    SOURCELENS_BIN_HOME: '',
     SOURCELENS_PROFILE: path.join(dir, 'profile'),
+    CODEX_HOME: path.join(dir, 'codex'),
     CLAUDE_HOME: path.join(dir, 'claude'),
     SOURCELENS_MCP_URL: '',
     SOURCELENS_API_KEY: '',
@@ -27,10 +35,10 @@ function fixture(t) {
 test('installation persists a working CLI beyond the package directory', (t) => {
   const { env, run } = fixture(t)
   const result = run(path.join(root, 'install.sh'), [
-    '--client', 'claude', '--no-mcp', '--url', 'http://localhost/mcp', '--api-key', 'test-key',
+    '--no-mcp', '--url', 'http://localhost/mcp', '--api-key', 'test-key',
   ])
   assert.equal(result.status, 0, result.stderr)
-  const installed = path.join(env.SOURCELENS_HOME, 'bin', 'sourcelens')
+  const installed = path.join(env.XDG_BIN_HOME, 'sourcelens')
   const help = spawnSync(installed, ['help'], { env, encoding: 'utf8' })
   assert.equal(help.status, 0, help.error?.message || help.stderr)
   assert.match(help.stderr, /Usage: sourcelens/)
@@ -38,7 +46,7 @@ test('installation persists a working CLI beyond the package directory', (t) => 
     env, encoding: 'utf8',
   })
   assert.equal(shell.stdout.trim(), installed)
-  const reinstall = spawnSync(installed, ['install', '--client', 'claude', '--no-mcp'], {
+  const reinstall = spawnSync(installed, ['install', '--no-mcp'], {
     env, encoding: 'utf8', input: '',
   })
   assert.equal(reinstall.status, 0, reinstall.stderr)
@@ -47,13 +55,28 @@ test('installation persists a working CLI beyond the package directory', (t) => 
 
 test('skill-only installation needs no credentials and preserves an existing env file', (t) => {
   const { env, run } = fixture(t)
-  const args = ['--client', 'claude', '--no-mcp']
+  const args = ['--no-mcp']
   const result = run(path.join(root, 'install.sh'), args)
   assert.equal(result.status, 0, result.stderr)
   assert.ok(fs.existsSync(path.join(env.CLAUDE_HOME, 'skills/sourcelens-qa/SKILL.md')))
-  const envFile = path.join(env.SOURCELENS_HOME, 'env')
+  assert.ok(fs.existsSync(path.join(env.CODEX_HOME, 'skills/sourcelens-qa/SKILL.md')))
+  const envFile = path.join(env.XDG_CONFIG_HOME, 'sourcelens', 'env')
   assert.equal(fs.existsSync(envFile), false)
+  fs.mkdirSync(path.dirname(envFile), { recursive: true })
   fs.writeFileSync(envFile, '# preserved credentials\n', { mode: 0o600 })
   assert.equal(run(path.join(root, 'install.sh'), args).status, 0)
   assert.equal(fs.readFileSync(envFile, 'utf8'), '# preserved credentials\n')
+})
+
+test('migrates credentials from the legacy ~/.sourcelens layout', (t) => {
+  const { env, run } = fixture(t)
+  const legacy = path.join(env.HOME, '.sourcelens')
+  fs.mkdirSync(legacy, { recursive: true })
+  fs.writeFileSync(path.join(legacy, 'env'), 'export SOURCELENS_API_KEY=legacy\n', { mode: 0o600 })
+  const result = run(path.join(root, 'install.sh'), ['--no-mcp'])
+  assert.equal(result.status, 0, result.stderr)
+  const migrated = path.join(env.XDG_CONFIG_HOME, 'sourcelens', 'env')
+  assert.equal(fs.readFileSync(migrated, 'utf8'), 'export SOURCELENS_API_KEY=legacy\n')
+  assert.match(result.stdout, /Migrated SourceLens credentials/)
+  assert.ok(fs.existsSync(legacy))
 })

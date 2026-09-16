@@ -12,7 +12,7 @@ before returning it.
 ## Workflow
 
 If `sourcelens` is not on `PATH` yet, invoke
-`"${SOURCELENS_HOME:-$HOME/.sourcelens}/bin/sourcelens"` in the commands below.
+`"$HOME/.local/bin/sourcelens"` in the commands below.
 
 1. **Discover the assistants.**
 
@@ -75,6 +75,7 @@ If `sourcelens` is not on `PATH` yet, invoke
 
 `sourcelens assistants` and `sourcelens ask` read `SOURCELENS_MCP_URL` and
 `SOURCELENS_API_KEY` from the environment, falling back to
-`~/.sourcelens/env` when the shell profile has not loaded them. Run
+`~/.config/sourcelens/env` when the shell profile has not loaded them. Run
 `sourcelens install --url <gateway> --api-key <key>` when they are missing or
-expired.
+expired. Run `sourcelens ping` to confirm the endpoint and its read-only tools
+respond; it spends no run and is safe to run before every session.

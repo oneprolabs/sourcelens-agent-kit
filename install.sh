@@ -3,43 +3,42 @@ set -euo pipefail
 
 root_dir="$(cd "$(dirname "$0")" && pwd)"
 skills_dir="$root_dir/skills/sourcelens-qa"
-env_dir="${SOURCELENS_HOME:-$HOME/.sourcelens}"
-env_file="$env_dir/env"
+legacy_home="$HOME/.sourcelens"
+config_dir="${SOURCELENS_CONFIG_HOME:-${SOURCELENS_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/sourcelens}}"
+data_dir="${SOURCELENS_DATA_HOME:-${SOURCELENS_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/sourcelens}}"
+bin_dir="${SOURCELENS_BIN_HOME:-${SOURCELENS_HOME:+$SOURCELENS_HOME/bin}}"
+bin_dir="${bin_dir:-${XDG_BIN_HOME:-$HOME/.local/bin}}"
+env_file="$config_dir/env"
 
-client=""
 url="${SOURCELENS_MCP_URL:-}"
 api_key="${SOURCELENS_API_KEY:-}"
 register_mcp=1
 
 usage() {
   cat >&2 <<'EOF'
-usage: install.sh [all|codex|claude] [--client all|codex|claude]
-       [--url URL] [--api-key KEY] [--no-mcp]
+usage: install.sh [--url URL] [--api-key KEY] [--no-mcp]
 
-  --client   install target: codex, claude, or all (default: all)
   --url      SourceLens MCP gateway URL (prompted when omitted)
   --api-key  SourceLens API key (prompted when omitted)
   --no-mcp   install the Skill and CLI without configuring credentials or MCP
+
+Layout follows the XDG base directory spec. Override with:
+  SOURCELENS_CONFIG_HOME  credentials directory (default ~/.config/sourcelens)
+  SOURCELENS_DATA_HOME    package directory (default ~/.local/share/sourcelens)
+  SOURCELENS_BIN_HOME     executable directory (default ~/.local/bin)
+  SOURCELENS_HOME         legacy single-directory layout (all of the above)
 EOF
 }
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --client) client="${2:?--client requires a value}"; shift 2 ;;
     --url) url="${2:?--url requires a value}"; shift 2 ;;
     --api-key) api_key="${2:?--api-key requires a value}"; shift 2 ;;
     --no-mcp) register_mcp=0; shift ;;
     -h|--help) usage; exit 0 ;;
-    codex|claude|all) client="$1"; shift ;;
     *) echo "unknown argument: $1" >&2; usage; exit 2 ;;
   esac
 done
-
-client="${client:-all}"
-case "$client" in
-  codex|claude|all) ;;
-  *) usage; exit 2 ;;
-esac
 
 if [ "$register_mcp" = "1" ] && [ -z "$url" ]; then
   if [ ! -t 0 ]; then
@@ -64,8 +63,8 @@ if [ "$register_mcp" = "1" ] && [ -z "$api_key" ]; then
 fi
 
 write_env() {
-  mkdir -p "$env_dir"
-  chmod 700 "$env_dir"
+  mkdir -p "$config_dir"
+  chmod 700 "$config_dir"
   (
     umask 077
     {
@@ -78,22 +77,7 @@ write_env() {
   echo "Wrote SourceLens credentials to $env_file"
 }
 
-install_cli() {
-  mkdir -p "$env_dir/client/bin" "$env_dir/client/skills/sourcelens-qa" "$env_dir/bin"
-  env_dir="$(cd "$env_dir" && pwd)"
-  env_file="$env_dir/env"
-  # The installed CLI can run install again from its own persistent package.
-  if [ ! "$root_dir" -ef "$env_dir/client" ]; then
-    cp "$root_dir/bin/sourcelens.js" "$env_dir/client/bin/sourcelens.js"
-    cp "$root_dir/install.sh" "$env_dir/client/install.sh"
-    cp "$skills_dir/SKILL.md" "$skills_dir/mcp.json" "$env_dir/client/skills/sourcelens-qa/"
-  fi
-  chmod +x "$env_dir/client/bin/sourcelens.js"
-  ln -sf ../client/bin/sourcelens.js "$env_dir/bin/sourcelens"
-  echo "Installed SourceLens CLI at $env_dir/bin/sourcelens"
-}
-
-register_profile() {
+profile_path() {
   local profile="${SOURCELENS_PROFILE:-}"
   if [ -z "$profile" ]; then
     case "$(basename "${SHELL:-sh}")" in
@@ -102,10 +86,52 @@ register_profile() {
       *) profile="$HOME/.profile" ;;
     esac
   fi
+  printf '%s' "$profile"
+}
+
+migrate_legacy() {
+  [ -d "$legacy_home" ] || return 0
+  if [ "$legacy_home" = "$config_dir" ] || [ "$legacy_home" = "$data_dir" ]; then
+    return 0
+  fi
+  if [ -f "$legacy_home/env" ] && [ ! -f "$env_file" ]; then
+    mkdir -p "$config_dir"
+    chmod 700 "$config_dir"
+    cp "$legacy_home/env" "$env_file"
+    chmod 600 "$env_file"
+    echo "Migrated SourceLens credentials from $legacy_home/env to $env_file"
+  fi
+  local profile tmp
+  profile="$(profile_path)"
+  if [ -f "$profile" ]; then
+    tmp="$profile.sourcelens.tmp"
+    grep -vF -e "$legacy_home/env" -e "$legacy_home/bin" "$profile" > "$tmp" || true
+    mv "$tmp" "$profile"
+  fi
+  echo "SourceLens moved out of $legacy_home; remove it once migration is verified."
+}
+
+install_cli() {
+  mkdir -p "$data_dir/bin" "$data_dir/skills/sourcelens-qa" "$bin_dir"
+  data_dir="$(cd "$data_dir" && pwd)"
+  # The installed CLI can run install again from its own persistent package.
+  if [ ! "$root_dir" -ef "$data_dir" ]; then
+    cp "$root_dir/bin/sourcelens.js" "$data_dir/bin/sourcelens.js"
+    cp "$root_dir/install.sh" "$data_dir/install.sh"
+    cp "$skills_dir/SKILL.md" "$skills_dir/mcp.json" "$data_dir/skills/sourcelens-qa/"
+  fi
+  chmod +x "$data_dir/bin/sourcelens.js"
+  ln -sf "$data_dir/bin/sourcelens.js" "$bin_dir/sourcelens"
+  echo "Installed SourceLens CLI at $bin_dir/sourcelens"
+}
+
+register_profile() {
+  local profile
+  profile="$(profile_path)"
   mkdir -p "$(dirname "$profile")"
   local env_line path_line
   printf -v env_line '[ ! -f %q ] || . %q' "$env_file" "$env_file"
-  printf -v path_line 'export PATH=%q:"$PATH"' "$env_dir/bin"
+  printf -v path_line 'export PATH=%q:"$PATH"' "$bin_dir"
   for line in "$env_line" "$path_line"; do
     if [ ! -f "$profile" ] || ! grep -qxF "$line" "$profile"; then
       printf '\n%s\n' "$line" >> "$profile"
@@ -157,24 +183,19 @@ register_claude_mcp() {
   echo "Registered MCP server 'sourcelens-qa' for Claude in $claude_config"
 }
 
+migrate_legacy
 install_cli
 if [ "$register_mcp" = "1" ]; then
   write_env
 fi
 register_profile
 
-case "$client" in
-  codex) install_codex ;;
-  claude) install_claude ;;
-  all) install_codex; install_claude ;;
-esac
+install_codex
+install_claude
 
 if [ "$register_mcp" = "1" ]; then
-  case "$client" in
-    codex) register_codex_mcp ;;
-    claude) register_claude_mcp ;;
-    all) register_codex_mcp; register_claude_mcp ;;
-  esac
+  register_codex_mcp
+  register_claude_mcp
 fi
 
-echo "Open a new shell to use sourcelens, or run $env_dir/bin/sourcelens directly."
+echo "Open a new shell to use sourcelens, or run $bin_dir/sourcelens directly."

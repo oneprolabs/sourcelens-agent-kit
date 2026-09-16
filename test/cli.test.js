@@ -38,9 +38,26 @@ async function fixture(t, options = {}) {
         next: options.paginated && !page ? `${origin}/api/assistants/?page=2` : null,
       } })
     }
-    if (req.url === '/api/mcp') return json(options.rpcError || {
-      jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text: 'run_uuid=run-1 result_path=/api/runs/run-1/' }] },
-    })
+    if (req.url === '/api/mcp') {
+      const body = raw ? JSON.parse(raw) : {}
+      if (options.rpcError) return json(options.rpcError)
+      if (body.method === 'initialize') return json({
+        jsonrpc: '2.0', id: body.id,
+        result: {
+          protocolVersion: '2025-03-26',
+          capabilities: { tools: {} },
+          serverInfo: { name: 'sourcelens-qa', version: '1.0.0' },
+        },
+      })
+      if (body.method === 'tools/list') return json({
+        jsonrpc: '2.0', id: body.id,
+        result: { tools: options.tools || [{ name: 'sourcelens_ask' }, { name: 'sourcelens_search' }] },
+      })
+      return json({
+        jsonrpc: '2.0', id: body.id,
+        result: { content: [{ type: 'text', text: 'run_uuid=run-1 result_path=/api/runs/run-1/' }] },
+      })
+    }
     if (req.url === '/api/runs/run-1/') {
       polls += 1
       if (options.hang === 'headers') return
@@ -97,6 +114,27 @@ test('empty assistant catalog has a readable message', async (t) => {
   const result = await run(['assistants'])
   assert.equal(result.code, 0)
   assert.match(result.stdout, /No assistants available/)
+})
+
+test('ping reports the MCP server and its read-only tools', async (t) => {
+  const { run, requests } = await fixture(t)
+  const result = await run(['ping', '--json'])
+  assert.equal(result.code, 0, result.stderr)
+  const info = JSON.parse(result.stdout)
+  assert.equal(info.server, 'sourcelens-qa')
+  assert.equal(info.protocolVersion, '2025-03-26')
+  assert.deepEqual(info.tools, ['sourcelens_ask', 'sourcelens_search'])
+  assert.equal(requests[0].body.method, 'initialize')
+  assert.equal(requests[1].body.method, 'tools/list')
+  assert.equal(requests[0].headers.authorization, 'Bearer test-key')
+  assert.equal(requests.some((req) => req.url.includes('/runs/')), false)
+})
+
+test('ping fails when a read-only tool is missing', async (t) => {
+  const { run } = await fixture(t, { tools: [{ name: 'sourcelens_ask' }] })
+  const result = await run(['ping'])
+  assert.notEqual(result.code, 0)
+  assert.match(result.stderr, /sourcelens_search/)
 })
 
 for (const selector of ['DOCS', 'assistant-1', '文档助手', '文档']) {

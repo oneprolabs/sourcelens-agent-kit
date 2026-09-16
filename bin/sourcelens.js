@@ -18,19 +18,22 @@ function usage() {
   console.error(`Usage: sourcelens <command> [options]
 
 Commands:
-  install [--client codex|claude|all] [--url URL] [--api-key KEY] [--no-mcp]
+  install [--url URL] [--api-key KEY] [--no-mcp]
         Install the SourceLens Q&A skill, store credentials, and register the
         MCP server with the host CLI. Pass --no-mcp to skip credentials and MCP setup.
 
   assistants [--json] [--lang zh|en|es]
         List assistants with the routing synopsis used to choose one.
 
+  ping [--json] [--lang zh|en|es]
+        Verify the MCP endpoint and its read-only tools. Spends no Q&A run.
+
   ask "<question>" --assistant <slug|uuid|name> [--tool sourcelens_ask|sourcelens_search]
         [--workspace NAME] [--max-results N] [--timeout S] [--json] [--lang zh|en|es]
         Ask one assistant and wait for the answer.
 
 Credentials come from SOURCELENS_MCP_URL and SOURCELENS_API_KEY, or from
-~/.sourcelens/env written by 'sourcelens install'.`)
+~/.config/sourcelens/env written by 'sourcelens install'.`)
 }
 
 function parseArgs(argv, spec) {
@@ -56,9 +59,15 @@ function parseArgs(argv, spec) {
   return options
 }
 
+function configDir() {
+  if (process.env.SOURCELENS_CONFIG_HOME) return process.env.SOURCELENS_CONFIG_HOME
+  if (process.env.SOURCELENS_HOME) return process.env.SOURCELENS_HOME
+  const base = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config')
+  return path.join(base, 'sourcelens')
+}
+
 function envFilePath() {
-  const home = process.env.SOURCELENS_HOME || path.join(os.homedir(), '.sourcelens')
-  return path.join(home, 'env')
+  return path.join(configDir(), 'env')
 }
 
 function readEnvFile() {
@@ -225,6 +234,56 @@ async function cmdAssistants(argv) {
   printTable(catalog)
 }
 
+async function mcpRpc(url, { key, lang }, body) {
+  const result = await request(url, { method: 'POST', key, lang, body })
+  const payload = result.payload
+  if (payload && typeof payload === 'object' && payload.error) {
+    die(`MCP error: ${payload.error.message || JSON.stringify(payload.error)}`)
+  }
+  if (result.status >= 400) {
+    die(`MCP request failed (${result.status}): ${JSON.stringify(payload)}`)
+  }
+  return payload && typeof payload === 'object' ? payload.result : undefined
+}
+
+async function cmdPing(argv) {
+  const options = parseArgs(argv, { json: 'bool', lang: 'value' })
+  const { url, key } = credentials()
+  const init = await mcpRpc(url, { key, lang: options.lang }, {
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'initialize',
+    params: {
+      protocolVersion: '2025-03-26',
+      capabilities: {},
+      clientInfo: { name: 'sourcelens-cli' },
+    },
+  })
+  const listed = await mcpRpc(url, { key, lang: options.lang }, {
+    jsonrpc: '2.0',
+    id: 2,
+    method: 'tools/list',
+  })
+  const serverInfo = (init && init.serverInfo) || {}
+  const tools = ((listed && listed.tools) || []).map((tool) => tool.name)
+  const missing = TOOLS.filter((tool) => !tools.includes(tool))
+  if (missing.length) die(`MCP endpoint is missing read-only tools: ${missing.join(', ')}`)
+  if (options.json) {
+    console.log(JSON.stringify({
+      url,
+      server: serverInfo.name || null,
+      version: serverInfo.version || null,
+      protocolVersion: (init && init.protocolVersion) || null,
+      tools,
+    }, null, 2))
+    return
+  }
+  console.log(`MCP endpoint OK: ${url}`)
+  console.log(`server: ${[serverInfo.name, serverInfo.version].filter(Boolean).join(' ') || 'unknown'}`)
+  console.log(`protocol: ${(init && init.protocolVersion) || 'unknown'}`)
+  console.log(`tools: ${tools.join(', ')}`)
+}
+
 async function cmdAsk(argv) {
   const options = parseArgs(argv, {
     assistant: 'value',
@@ -315,6 +374,8 @@ async function main() {
       return cmdInstall(argv)
     case 'assistants':
       return cmdAssistants(argv)
+    case 'ping':
+      return cmdPing(argv)
     case 'ask':
       return cmdAsk(argv)
     case 'help':
