@@ -11,6 +11,8 @@ directly, and data-source enforcement stays on the server.
 sourcelens ping                         # service URL + credentials, no Q&A run
 sourcelens assistants --json            # routing catalog: uuid, capability, datasources, routing_description
 sourcelens ask "<question>" --assistant <slug|uuid|name>
+sourcelens ask "<question>" --assistant <slug|uuid|name> --download-dir ./artifacts --json
+sourcelens download <run-uuid> --download-dir ./artifacts --json
 ```
 
 `ping` is the lightweight check that the service URL, credentials, and scope
@@ -18,8 +20,17 @@ work; `assistants` lists every assistant visible to the account. The agent reads
 the `routing_description` of each candidate, picks the best match — asking the
 user to choose when none clearly fits — and then runs `ask`, which creates a
 session and run, waits for completion, and prints the answer.
-`--json` returns the raw run payload (`uuid`, `status`, `answer`, `citations`)
+`--json` returns the run payload (`uuid`, `status`, `answer`, `citations`, `output_files`)
 so the agent can shape the final reply itself.
+
+Use `--download-dir` to save published output files under the run UUID and
+receive each file's absolute `local_path`. Open that path with the appropriate
+local file or document tool. Download errors preserve the answer, mark the file
+as failed, and return a nonzero exit code; existing files are never overwritten.
+`download` retries an existing completed run without spending another Q&A run;
+choose a fresh destination if files already exist. Downloads require a server
+that returns `output_files` and permits agent credentials on the private file
+endpoint. `--timeout` also bounds each individual file download.
 
 ## Configuration
 
