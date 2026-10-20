@@ -1,6 +1,6 @@
 {
   "name": "sourcelens-agent-kit",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Installable SourceLens Agent Kit with a read-only Q&A CLI and Skills for Codex and Claude",
   "bin": {
     "sourcelens": "bin/sourcelens.js"

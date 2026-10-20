@@ -4,6 +4,8 @@ const { spawnSync } = require('child_process')
 const fs = require('fs')
 const os = require('os')
 const path = require('path')
+const { Readable, Transform } = require('stream')
+const { pipeline } = require('stream/promises')
 
 const POLL_INTERVAL_MS = 1500
 const DEFAULT_TIMEOUT_S = 180
@@ -29,8 +31,13 @@ Commands:
         Verify the service URL and credentials. Spends no Q&A run.
 
   ask "<question>" --assistant <slug|uuid|name> [--timeout S] [--json]
-        [--lang zh|en|es]
+        [--lang zh|en|es] [--download-dir DIR]
         Ask one assistant and wait for the answer.
+        Optionally save published files under DIR/<run UUID>/.
+
+  download <run-uuid> --download-dir DIR [--timeout S] [--json]
+        [--lang zh|en|es]
+        Download files from an existing completed run without asking again.
 
 Credentials come from SOURCELENS_BASE_URL and SOURCELENS_API_KEY, or from
 ~/.config/sourcelens/env written by 'sourcelens install'.`)
@@ -259,18 +266,161 @@ async function cmdPing(argv) {
   console.log(`assistants visible: ${visible}`)
 }
 
+function timeoutSeconds(options) {
+  const timeout = Number(options.timeout || DEFAULT_TIMEOUT_S)
+  if (!Number.isFinite(timeout) || timeout <= 0) die('--timeout must be a positive number')
+  return timeout
+}
+
+function safePathSegment(value) {
+  if (typeof value !== 'string' || !value || value === '.' || value === '..' || /[/\\\x00-\x1f\x7f]/.test(value)) {
+    throw new Error('unsafe file name or run identifier')
+  }
+  return value
+}
+
+async function downloadFile(file, runUuid, directory, { url, key, lang, timeout }, filename) {
+  safePathSegment(runUuid)
+  safePathSegment(filename)
+  if (file.status !== 'published') throw new Error('file is not published')
+  if (!Number.isSafeInteger(file.byte_size) || file.byte_size < 0) throw new Error('invalid file byte size')
+  if (typeof file.url !== 'string' || !file.url) throw new Error('missing file URL')
+  const remote = new URL(file.url, `${url}/`)
+  if (remote.origin !== new URL(url).origin || remote.username || remote.password) {
+    throw new Error('file URL must use the SourceLens service origin')
+  }
+
+  await fs.promises.mkdir(path.resolve(directory), { recursive: true, mode: 0o700 })
+  const root = await fs.promises.realpath(directory)
+  const runDir = path.join(root, runUuid)
+  await fs.promises.mkdir(runDir, { recursive: true, mode: 0o700 })
+  if ((await fs.promises.lstat(runDir)).isSymbolicLink()) throw new Error('run directory must not be a symbolic link')
+  const target = path.join(runDir, filename)
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeout * 1000)
+  let handle
+  let completed = false
+  try {
+    handle = await fs.promises.open(target, 'wx', 0o600)
+    const headers = { Authorization: `Bearer ${key}` }
+    if (lang) headers['Accept-Language'] = lang
+    const response = await fetch(remote, { headers, redirect: 'manual', signal: controller.signal })
+    if (response.status !== 200) {
+      await response.body?.cancel()
+      throw new Error(`file download failed (HTTP ${response.status})`)
+    }
+    let size = 0
+    const counter = new Transform({
+      transform(chunk, encoding, callback) {
+        size += chunk.length
+        callback(size > file.byte_size ? new Error('file size exceeds metadata') : null, chunk)
+      },
+    })
+    await pipeline(Readable.fromWeb(response.body), counter, handle.createWriteStream(), { signal: controller.signal })
+    if (size !== file.byte_size) throw new Error('file size does not match metadata')
+    completed = true
+    return target
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error('file download timed out')
+    throw error
+  } finally {
+    clearTimeout(timer)
+    if (handle) {
+      await handle.close()
+      if (!completed) await fs.promises.unlink(target)
+    }
+  }
+}
+
+function outputFilename(original, prefix = '') {
+  const extension = path.extname(original)
+  const stem = Array.from(original.slice(0, original.length - extension.length))
+  // Count decomposed UTF-8 bytes so names also fit common macOS filesystems.
+  do {
+    const filename = `${prefix}${stem.join('')}${extension}`
+    if (Buffer.byteLength(filename.normalize('NFD')) <= 255) return safePathSegment(filename)
+  } while (stem.pop() !== undefined)
+  throw new Error('file name prefix or extension exceeds local filesystem limit')
+}
+
+async function downloadOutputFiles(run, directory, config) {
+  if (!directory || run.status !== 'done') return
+  if (!Array.isArray(run.output_files)) {
+    console.error('server does not expose output_files; update SourceLens before downloading deliverables')
+    process.exitCode = 1
+    return
+  }
+  const usedNames = new Set()
+  // Reserve case and Unicode equivalents too, for common macOS filesystems.
+  const nameKey = (name) => name.normalize('NFD').toLowerCase()
+  for (const file of run.output_files || []) {
+    delete file.local_path
+    delete file.download_error
+    try {
+      const original = safePathSegment(file.filename)
+      let filename = outputFilename(original)
+      let attempt = 0
+      while (usedNames.has(nameKey(filename))) {
+        const prefix = safePathSegment(file.uuid)
+        filename = outputFilename(original, `${prefix}-${attempt ? `${attempt}-` : ''}`)
+        attempt += 1
+      }
+      usedNames.add(nameKey(filename))
+      file.local_path = await downloadFile(file, run.uuid, directory, config, filename)
+      file.download_status = 'downloaded'
+    } catch (error) {
+      file.download_status = 'failed'
+      file.download_error = error.message
+      console.error(`File ${JSON.stringify(file.filename)}: ${error.message}`)
+      process.exitCode = 1
+    }
+  }
+}
+
+function printOutputFiles(run) {
+  if (!run.output_files?.length) return
+  console.log('\nFiles:')
+  for (const file of run.output_files) {
+    console.log(`- ${JSON.stringify(file.filename)}: ${file.local_path || file.url}`)
+    if (file.download_error) console.log(`  Download failed: ${file.download_error}`)
+  }
+}
+
+async function cmdDownload(argv) {
+  const options = parseArgs(argv, { 'download-dir': 'value', timeout: 'value', json: 'bool', lang: 'value' })
+  if (options._.length !== 1 || !/^[a-zA-Z0-9_-]+$/.test(options._[0])) die('download requires one run UUID')
+  if (!options['download-dir']) die('download requires --download-dir DIR')
+  const timeout = timeoutSeconds(options)
+  const { url, key } = credentials()
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeout * 1000)
+  let run
+  try {
+    run = unwrap(await request(endpoints(url).run(options._[0]), { key, lang: options.lang, signal: controller.signal }))
+  } finally {
+    clearTimeout(timer)
+  }
+  await downloadOutputFiles(run, options['download-dir'], { url, key, lang: options.lang, timeout })
+  if (options.json) console.log(JSON.stringify(run, null, 2))
+  else printOutputFiles(run)
+  if (run.status !== 'done') {
+    console.error(`run is not completed (status=${run.status}); no files downloaded`)
+    process.exitCode = 1
+  }
+}
+
 async function cmdAsk(argv) {
   const options = parseArgs(argv, {
     assistant: 'value',
     timeout: 'value',
     json: 'bool',
     lang: 'value',
+    'download-dir': 'value',
   })
   const query = options._.join(' ').trim()
   if (!query) die('ask requires a question, e.g. sourcelens ask "..." --assistant <name>')
   if (!options.assistant) die('ask requires --assistant <slug|uuid|name>')
-  const timeout = Number(options.timeout || DEFAULT_TIMEOUT_S)
-  if (!Number.isFinite(timeout) || timeout <= 0) die('--timeout must be a positive number')
+  const timeout = timeoutSeconds(options)
 
   const { url, key } = credentials()
   const api = endpoints(url)
@@ -329,6 +479,7 @@ async function cmdAsk(argv) {
   }
 
   const unfinished = !run || !TERMINAL_STATUSES.includes(run.status)
+  if (run) await downloadOutputFiles(run, options['download-dir'], { url, key, lang: options.lang, timeout })
   if (options.json) {
     if (run !== undefined) console.log(JSON.stringify(run, null, 2))
     if (unfinished) console.error('timed out waiting for the assistant result')
@@ -342,6 +493,7 @@ async function cmdAsk(argv) {
     console.log('\nCitations:')
     citations.forEach((citation) => console.log(`- ${JSON.stringify(citation)}`))
   }
+  printOutputFiles(run)
   if (run.status !== 'done') process.exitCode = 1
 }
 
@@ -356,6 +508,8 @@ async function main() {
       return cmdPing(argv)
     case 'ask':
       return cmdAsk(argv)
+    case 'download':
+      return cmdDownload(argv)
     case 'help':
     case undefined:
       usage()
